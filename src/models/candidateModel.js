@@ -1,11 +1,43 @@
 const db = require('../config/db');
 
-async function createCandidate({ job_id, name, email, phone, resume_path, resume_url, resume_text, ai_summary, skills_json, match_score = 0 }) {
+async function createCandidate({
+  job_id,
+  name,
+  email,
+  phone,
+  resume_path,
+  resume_url,
+  resume_text,
+  ai_summary,
+  skills_json,
+  github_url = null,
+  linkedin_url = null,
+  portfolio_url = null,
+  current_role = null,
+  total_experience_years = null,
+  match_score = 0,
+}) {
   const [result] = await db.query(
     `INSERT INTO candidates 
-     (job_id, name, email, phone, resume_path, resume_url, resume_text, ai_summary, skills_json, match_score) 
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [job_id, name, email, phone, resume_path, resume_url, resume_text, ai_summary, JSON.stringify(skills_json), match_score]
+     (job_id, name, email, phone, resume_path, resume_url, resume_text, ai_summary, skills_json, github_url, linkedin_url, portfolio_url, current_role, total_experience_years, match_score) 
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      job_id,
+      name,
+      email,
+      phone,
+      resume_path,
+      resume_url,
+      resume_text,
+      ai_summary,
+      JSON.stringify(skills_json),
+      github_url,
+      linkedin_url,
+      portfolio_url,
+      current_role,
+      total_experience_years,
+      match_score,
+    ]
   );
   return result.insertId;
 }
@@ -20,7 +52,7 @@ async function getCandidateById(id) {
 
 async function getCandidateDeleteData(id) {
   const [rows] = await db.query(
-    'SELECT id, id AS candidate_id, resume_path FROM candidates WHERE id = ?',
+    'SELECT id, id AS candidate_id, resume_path, resume_url FROM candidates WHERE id = ?',
     [id]
   );
   return rows[0] || null;

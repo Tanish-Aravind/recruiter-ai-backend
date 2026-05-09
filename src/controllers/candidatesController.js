@@ -6,6 +6,7 @@ const candidateModel = require('../models/candidateModel');
 const jobModel = require('../models/jobModel');
 const fs = require('fs');
 const { summarizeResume, scoreResume, analyzeTrust } = require('../services/grokService');
+
 function normalizeMatchScore(score) {
   const numericScore = Number(score);
   if (!Number.isFinite(numericScore)) {
@@ -60,6 +61,152 @@ async function ensureCandidateScores(job, candidates) {
   return candidates;
 }
 
+function extractFirstMatch(text, regex) {
+  const match = text.match(regex);
+  return match ? match[1].trim() : null;
+}
+
+function parseSkills(skillsJson) {
+  try {
+    if (Array.isArray(skillsJson)) {
+      return skillsJson.filter(Boolean);
+    }
+
+    const parsed = JSON.parse(skillsJson || '[]');
+    return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+  } catch {
+    return skillsJson?.split(',').map((skill) => skill.trim()).filter(Boolean) || [];
+  }
+}
+
+function normalizeUrl(url) {
+  if (!url) return null;
+  const trimmed = String(url).trim();
+  return trimmed || null;
+}
+
+function extractLinks(resumeText) {
+  const githubUrl = extractFirstMatch(
+    resumeText,
+    /\b(https?:\/\/(?:www\.)?github\.com\/[A-Za-z0-9._-]+\/?)\b/i
+  );
+  const linkedinUrl = extractFirstMatch(
+    resumeText,
+    /\b(https?:\/\/(?:www\.)?linkedin\.com\/[^\s)]+)\b/i
+  );
+
+  const urlMatches = resumeText.match(/\bhttps?:\/\/[^\s)]+/gi) || [];
+  const portfolioUrl = urlMatches.find((url) => {
+    const lower = url.toLowerCase();
+    return !lower.includes('github.com') && !lower.includes('linkedin.com');
+  }) || null;
+
+  return {
+    github_url: normalizeUrl(githubUrl),
+    linkedin_url: normalizeUrl(linkedinUrl),
+    portfolio_url: normalizeUrl(portfolioUrl),
+  };
+}
+
+function toRoleScoreOutOf10(matchScore) {
+  const score = normalizeMatchScore(matchScore);
+  return Number((score / 10).toFixed(1));
+}
+
+function buildCandidateSummary(candidate) {
+  const techSkills = parseSkills(candidate.skills_json).slice(0, 8);
+
+  return {
+    name: candidate.name || 'Unknown Candidate',
+    email: candidate.email || null,
+    phone: candidate.phone || null,
+    current_role: candidate.current_role || null,
+    total_experience_years: candidate.total_experience_years ?? null,
+    tech_skills: techSkills,
+    role_score_out_of_10: toRoleScoreOutOf10(candidate.match_score),
+    short_summary: candidate.ai_summary || null,
+    github_link: candidate.github_url || null,
+    linkedin_link: candidate.linkedin_url || null,
+    portfolio_link: candidate.portfolio_url || null,
+    trust_score: candidate.trust_score ?? null,
+    status: candidate.status || 'uploaded',
+  };
+}
+
+function attachCandidateSummary(candidate) {
+  if (!candidate) return candidate;
+
+  return {
+    ...candidate,
+    candidate_summary: buildCandidateSummary(candidate),
+  };
+}
+
+function buildFallbackParsedResume(resumeText, originalname = '') {
+  const lines = resumeText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const email = extractFirstMatch(resumeText, /\b([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\b/i);
+  const phone = extractFirstMatch(
+    resumeText,
+    /(\+?\d[\d\s\-()]{7,}\d)/
+  );
+  const name = lines[0] || originalname.replace(/\.[^.]+$/, '') || 'Unknown Candidate';
+
+  return {
+    name,
+    email,
+    phone,
+    current_role: null,
+    total_experience_years: null,
+    skills: [],
+    summary: lines.slice(0, 2).join(' ').slice(0, 220) || 'Resume uploaded successfully.',
+    ...extractLinks(resumeText),
+  };
+}
+
+async function parseCandidateDetails(resumeText, originalname) {
+  try {
+    const parsed = await summarizeResume(resumeText);
+    const fallback = buildFallbackParsedResume(resumeText, originalname);
+    return {
+      ...fallback,
+      ...parsed,
+      skills: Array.isArray(parsed?.skills) ? parsed.skills : [],
+      github_url: normalizeUrl(parsed?.github_url) || fallback.github_url,
+      linkedin_url: normalizeUrl(parsed?.linkedin_url) || fallback.linkedin_url,
+      portfolio_url: normalizeUrl(parsed?.portfolio_url) || fallback.portfolio_url,
+    };
+  } catch (err) {
+    console.error('Resume summarization error:', err.message);
+    return buildFallbackParsedResume(resumeText, originalname);
+  }
+}
+
+async function uploadResumeAsset(file) {
+  try {
+    const { public_id, url } = await uploadToCloudinary(
+      file.path,
+      file.originalname
+    );
+
+    return { resume_path: public_id, resume_url: url };
+  } catch (err) {
+    console.error('Cloudinary upload error:', err.message);
+
+    return {
+      resume_path: file.filename,
+      resume_url: `/uploads/${file.filename}`,
+    };
+  }
+}
+
+function isLocalUpload(candidate) {
+  return typeof candidate?.resume_url === 'string' && candidate.resume_url.startsWith('/uploads/');
+}
+
 async function uploadResume(req, res) {
   try {
     if (!req.file) {
@@ -80,13 +227,10 @@ async function uploadResume(req, res) {
     }
 
     // 2. Upload to Cloudinary
-    const { public_id, url } = await uploadToCloudinary(
-      req.file.path,
-      req.file.originalname
-    );
+    const resumeAsset = await uploadResumeAsset(req.file);
 
     // 3. Summarize with Groq
-    const parsed = await summarizeResume(resumeText);
+    const parsed = await parseCandidateDetails(resumeText, req.file.originalname);
 
     // 4. Score against JD
     let matchScore = 0;
@@ -107,15 +251,20 @@ async function uploadResume(req, res) {
       name: parsed.name,
       email: parsed.email,
       phone: parsed.phone,
-      resume_path: public_id,
-      resume_url: url,
+      resume_path: resumeAsset.resume_path,
+      resume_url: resumeAsset.resume_url,
       resume_text: resumeText,
       ai_summary: parsed.summary,
       skills_json: parsed.skills || [],
+      github_url: parsed.github_url || null,
+      linkedin_url: parsed.linkedin_url || null,
+      portfolio_url: parsed.portfolio_url || null,
+      current_role: parsed.current_role || null,
+      total_experience_years: parsed.total_experience_years ?? null,
       match_score: matchScore,
     });
 
-    const candidate = await candidateModel.getCandidateById(candidateId);
+    const candidate = attachCandidateSummary(await candidateModel.getCandidateById(candidateId));
 
     // 7. Trust analysis (non-blocking)
     (async () => {
@@ -142,6 +291,7 @@ async function uploadResume(req, res) {
       candidate,
       parsed,
       score: scoreData,
+      candidate_summary: candidate.candidate_summary,
     });
   } catch (err) {
     console.error('Upload error:', err.message);
@@ -187,13 +337,10 @@ async function uploadBatch(req, res) {
         }
 
         // 2. Upload to Cloudinary
-        const { public_id, url } = await uploadToCloudinary(
-          file.path,
-          file.originalname
-        );
+        const resumeAsset = await uploadResumeAsset(file);
 
         // 3. Summarize with Groq
-        const parsed = await summarizeResume(resumeText);
+        const parsed = await parseCandidateDetails(resumeText, file.originalname);
 
         // 4. Score against JD
         let matchScore = 0;
@@ -212,11 +359,16 @@ async function uploadBatch(req, res) {
           name: parsed.name,
           email: parsed.email,
           phone: parsed.phone,
-          resume_path: public_id,
-          resume_url: url,
+          resume_path: resumeAsset.resume_path,
+          resume_url: resumeAsset.resume_url,
           resume_text: resumeText,
           ai_summary: parsed.summary,
           skills_json: parsed.skills || [],
+          github_url: parsed.github_url || null,
+          linkedin_url: parsed.linkedin_url || null,
+          portfolio_url: parsed.portfolio_url || null,
+          current_role: parsed.current_role || null,
+          total_experience_years: parsed.total_experience_years ?? null,
           match_score: matchScore,
         });
 
@@ -247,6 +399,21 @@ async function uploadBatch(req, res) {
           name: parsed.name,
           email: parsed.email,
           match_score: matchScore,
+          candidate_summary: buildCandidateSummary({
+            name: parsed.name,
+            email: parsed.email,
+            phone: parsed.phone,
+            current_role: parsed.current_role || null,
+            total_experience_years: parsed.total_experience_years ?? null,
+            skills_json: parsed.skills || [],
+            match_score: matchScore,
+            ai_summary: parsed.summary,
+            github_url: parsed.github_url || null,
+            linkedin_url: parsed.linkedin_url || null,
+            portfolio_url: parsed.portfolio_url || null,
+            trust_score: null,
+            status: 'uploaded',
+          }),
         });
 
       } catch (err) {
@@ -284,7 +451,7 @@ async function getCandidates(req, res) {
 
     await ensureCandidateScores(job, candidates);
 
-    res.json(candidates);
+    res.json(candidates.map(attachCandidateSummary));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -294,7 +461,7 @@ async function getCandidate(req, res) {
   try {
     const candidate = await candidateModel.getCandidateById(req.params.id);
     if (!candidate) return res.status(404).json({ error: 'Candidate not found' });
-    res.json(candidate);
+    res.json(attachCandidateSummary(candidate));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -344,7 +511,24 @@ async function deleteCandidate(req, res) {
 
     const cleanupTasks = [];
 
-    if (candidate.resume_path) {
+    if (candidate.resume_path && isLocalUpload(candidate)) {
+      cleanupTasks.push(
+        new Promise((resolve) => {
+          const localPath = `uploads/${candidate.resume_path}`;
+          if (fs.existsSync(localPath)) {
+            fs.unlink(localPath, (err) => {
+              if (err) {
+                console.error('Local file delete error:', err.message);
+              }
+              resolve();
+            });
+            return;
+          }
+
+          resolve();
+        })
+      );
+    } else if (candidate.resume_path) {
       cleanupTasks.push(
         deleteFromCloudinary(candidate.resume_path).catch(err =>
           console.error('Cloudinary delete error:', err.message)

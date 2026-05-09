@@ -18,6 +18,7 @@ async function sendMessage(req, res) {
     if (!candidate) {
       return res.status(404).json({ error: 'Candidate not found' });
     }
+    const githubData = await getCandidateGithubData(candidateId);
 
     // Get or create chat session
     const sessionId = await chatModel.getOrCreateSession(candidateId, userId);
@@ -29,13 +30,29 @@ async function sendMessage(req, res) {
     await chatModel.saveMessage(sessionId, 'user', question);
 
     // Retrieve relevant RAG chunks and answer with conversation history
-    const retrievedChunks = await retrieveContext(candidateId, question);
+    let retrievedChunks = [];
+    try {
+      retrievedChunks = await retrieveContext(candidateId, question);
+    } catch (err) {
+      console.error('RAG retrieval error:', err.message);
+    }
+
+    if (!retrievedChunks.length) {
+      retrievedChunks = buildRetrievedChunks(candidate, githubData);
+    } else {
+      retrievedChunks = ensureBothSources(retrievedChunks, candidate, githubData);
+    }
+
     const answer = await answerQuestion(question, retrievedChunks, previousMessages);
 
     // Save assistant message
     await chatModel.saveMessage(sessionId, 'assistant', answer);
 
-    res.json({ question, answer });
+    res.json({
+      question,
+      answer,
+      sources: [...new Set(retrievedChunks.map((chunk) => chunk.source))],
+    });
   } catch (err) {
     console.error('Chat error:', err.message);
     res.status(500).json({ error: err.message });
@@ -56,8 +73,7 @@ async function getChatHistory(req, res) {
   }
 }
 
-function buildContext(candidate, githubData) {
-  // Safely parse skills_json whether it's a string, array, or already parsed
+function getCandidateSkills(candidate) {
   let skills = [];
   try {
     if (Array.isArray(candidate.skills_json)) {
@@ -67,11 +83,16 @@ function buildContext(candidate, githubData) {
       skills = Array.isArray(parsed) ? parsed : [parsed];
     }
   } catch {
-    // If it's a plain comma-separated string like "Python,C,C++"
     skills = candidate.skills_json ? candidate.skills_json.split(',').map(s => s.trim()) : [];
   }
 
-  let context = `
+  return skills;
+}
+
+function buildResumeContext(candidate) {
+  const skills = getCandidateSkills(candidate);
+
+  return `
 CANDIDATE PROFILE:
 Name: ${candidate.name}
 Email: ${candidate.email}
@@ -82,24 +103,25 @@ Skills: ${skills.join(', ')}
 FULL RESUME TEXT:
 ${candidate.resume_text}
 `;
+}
 
-  if (githubData) {
-    let repos = [];
-    let languages = {};
+function buildGithubContext(githubData) {
+  let repos = [];
+  let languages = {};
 
-    try {
-      repos = typeof githubData.repos_json === 'string'
-        ? JSON.parse(githubData.repos_json)
-        : githubData.repos_json;
+  try {
+    repos = typeof githubData.repos_json === 'string'
+      ? JSON.parse(githubData.repos_json)
+      : (githubData.repos_json || []);
 
-      languages = typeof githubData.languages_json === 'string'
-        ? JSON.parse(githubData.languages_json)
-        : githubData.languages_json;
-    } catch (e) {
-      console.error('Error parsing github data:', e.message);
-    }
+    languages = typeof githubData.languages_json === 'string'
+      ? JSON.parse(githubData.languages_json)
+      : (githubData.languages_json || {});
+  } catch (e) {
+    console.error('Error parsing github data:', e.message);
+  }
 
-    context += `
+  return `
 GITHUB PROFILE:
 Languages used across repos: ${Object.keys(languages).join(', ')}
 
@@ -111,9 +133,61 @@ ${repos.map(r => `
   README excerpt: ${r.readme ? r.readme.slice(0, 300) : 'No README'}
 `).join('')}
 `;
+}
+
+function buildRetrievedChunks(candidate, githubData) {
+  const chunks = [];
+
+  if (candidate?.resume_text) {
+    chunks.push({
+      source: 'resume',
+      chunk_text: buildResumeContext(candidate),
+      similarity: 1,
+    });
   }
 
-  return context;
+  if (githubData) {
+    chunks.push({
+      source: 'github',
+      chunk_text: buildGithubContext(githubData),
+      similarity: 1,
+    });
+  }
+
+  return chunks;
+}
+
+function ensureBothSources(retrievedChunks, candidate, githubData) {
+  const chunks = Array.isArray(retrievedChunks) ? [...retrievedChunks] : [];
+  const hasResume = chunks.some((chunk) => chunk.source === 'resume');
+  const hasGithub = chunks.some((chunk) => chunk.source === 'github');
+
+  if (!hasResume && candidate?.resume_text) {
+    chunks.push({
+      source: 'resume',
+      chunk_text: buildResumeContext(candidate),
+      similarity: 0,
+    });
+  }
+
+  if (!hasGithub && githubData) {
+    chunks.push({
+      source: 'github',
+      chunk_text: buildGithubContext(githubData),
+      similarity: 0,
+    });
+  }
+
+  return chunks;
+}
+
+async function getCandidateGithubData(candidateId) {
+  try {
+    return await candidateModel.getGithubData(candidateId);
+  } catch (err) {
+    console.error('GitHub context load error:', err.message);
+    return null;
+  }
 }
 
 module.exports = { sendMessage, getChatHistory };

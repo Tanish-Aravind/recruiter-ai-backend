@@ -4,6 +4,7 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const cookieParser = require('cookie-parser');
 const passport = require('passport');
+const multer = require('multer');
 require('./config/passport');
 
 const authRoutes = require('./routes/auth');
@@ -25,6 +26,7 @@ app.use(morgan('dev'));
 app.use(express.json());
 app.use(cookieParser());
 app.use(passport.initialize());
+app.use('/uploads', express.static('uploads'));
 
 app.use('/auth', authRoutes);
 app.use('/api/jobs', jobRoutes);
@@ -45,6 +47,22 @@ app.get('/test-pinecone', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: 'File too large. Maximum allowed size is 5MB.' });
+    }
+
+    return res.status(400).json({ error: err.message });
+  }
+
+  if (err?.message === 'Only PDF and DOCX files are allowed') {
+    return res.status(400).json({ error: err.message });
+  }
+
+  return next(err);
 });
 
 module.exports = app;

@@ -1,6 +1,13 @@
 const fs = require('fs');
 const path = require('path');
 const mammoth = require('mammoth');
+const { pathToFileURL } = require('url');
+
+const pdfjsPackagePath = require.resolve('pdfjs-dist/package.json');
+const pdfjsRootDir = path.dirname(pdfjsPackagePath);
+const standardFontDataUrl = pathToFileURL(
+  path.join(pdfjsRootDir, 'standard_fonts', path.sep)
+).href;
 
 async function parseResume(filePath) {
   const ext = path.extname(filePath).toLowerCase();
@@ -23,7 +30,10 @@ async function parsePdf(filePath) {
   const dataBuffer = fs.readFileSync(filePath);
   const uint8Array = new Uint8Array(dataBuffer);
 
-  const pdf = await getDocument({ data: uint8Array }).promise;
+  const pdf = await getDocument({
+    data: uint8Array,
+    standardFontDataUrl,
+  }).promise;
   let fullText = '';
 
   for (let i = 1; i <= pdf.numPages; i++) {

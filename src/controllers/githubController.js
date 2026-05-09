@@ -1,5 +1,6 @@
 const { fetchGithubData } = require('../services/githubService');
 const candidateModel = require('../models/candidateModel');
+const { indexCandidate } = require('../services/ragService');
 
 function formatTopLanguages(languages = {}, limit = 5) {
   const entries = Object.entries(languages).sort(([, a], [, b]) => b - a);
@@ -104,6 +105,13 @@ async function analyzeGithub(req, res) {
     await candidateModel.saveGithubData(candidateId, {
       repos_json: githubData.repos,
       languages_json: githubData.languages,
+    });
+
+    indexCandidate(candidateId, candidate.resume_text, {
+      repos_json: githubData.repos,
+      languages_json: githubData.languages,
+    }).catch((err) => {
+      console.error('GitHub reindex error:', err.message);
     });
 
     res.json({

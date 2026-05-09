@@ -42,9 +42,12 @@ async function summarizeResume(resumeText) {
   "total_experience_years": number or null,
   "current_role": "latest job title or null",
   "skills": ["skill1", "skill2"],
+  "linkedin_url": "linkedin profile url or null",
+  "portfolio_url": "portfolio/personal website url or null",
+  "github_url": "github profile url or null",
   "education": [{"degree": "", "institution": "", "year": ""}],
   "experience": [{"role": "", "company": "", "duration": "", "summary": ""}],
-  "summary": "3-4 sentence professional summary of the candidate",
+  "summary": "very short 1-2 sentence summary, under 220 characters",
   "strengths": ["strength1", "strength2"],
   "red_flags": ["anything concerning or empty array"]
 }`,
@@ -83,7 +86,7 @@ async function answerQuestion(question, retrievedChunks, conversationHistory = [
     messages: [
       {
         role: 'system',
-        content: `You are a helpful recruiter assistant. Answer questions about a candidate using ONLY the retrieved context chunks below. Be specific and cite which part of the resume or GitHub you're drawing from. If the answer isn't in the context, say so clearly.
+        content: `You are a helpful recruiter assistant. Answer questions about a candidate using ONLY the retrieved context chunks below. Be specific about whether the answer comes from the resume or GitHub. If GitHub context is not present, answer using only the resume. If the answer isn't in the available context, say so clearly.
 
 Retrieved context:
 ${context}`,
